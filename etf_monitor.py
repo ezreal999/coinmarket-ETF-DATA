@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 import os
 import base64
 import json
