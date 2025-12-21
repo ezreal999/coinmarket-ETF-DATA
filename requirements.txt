@@ -1,2 +1,6 @@
+<<<<<<< HEAD
 playwright==1.48.0
+=======
+playwright==1.48.0
+>>>>>>> c1a90b6e97202ba9334e3be0403e765df83626a5
 requests==2.32.3
