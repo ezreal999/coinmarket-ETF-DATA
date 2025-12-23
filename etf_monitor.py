@@ -187,7 +187,24 @@ def main():
 
         image_b64 = image_to_base64(SCREENSHOT_PATH)
         result = analyze_with_qwen_vl(image_b64)
-        # ...后续处理...
+
+        # 清理响应
+        clean = result.strip().strip('`')
+        if clean.startswith("json"):
+            clean = clean[4:].strip()
+        data = json.loads(clean)
+
+        if "error" in data:
+            send_pushplus("🔍 数据未识别", "Qwen-VL 未能提取 Net Flow 数据")
+        else:
+            msg = f"<b>📅 日期:</b> {data['date']}<br><b>💰 Net Flow:</b> {data['net_flow']}<br><i>来源: CoinMarketCap (官方)</i>"
+            send_pushplus("📊 Bitcoin ETF 数据", msg)
+
+    except Exception as e:
+        send_pushplus("💥 程序异常", f"<pre>{str(e)}</pre>")
+    finally:
+        if os.path.exists(SCREENSHOT_PATH):
+            os.remove(SCREENSHOT_PATH)
 
 if __name__ == "__main__":
     main()
