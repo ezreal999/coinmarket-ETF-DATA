@@ -21,6 +21,7 @@ def take_screenshot():
                 "--disable-background-timer-throttling",
                 "--disable-renderer-backgrounding",
                 "--lang=en-US",
+                "--disable-features=IsolateOrigins,site-per-process",  # 减少沙箱隔离
             ]
         )
 
@@ -29,58 +30,88 @@ def take_screenshot():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             locale="en-US",
             timezone_id="America/New_York",
+            permissions=["geolocation"],
+            java_script_enabled=True,
         )
 
-        # 移除自动化痕迹
         context.add_init_script("""
             delete navigator.__proto__.webdriver;
             window.chrome = {runtime: {}};
             Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            Object.defineProperty(navigator, 'connection', {
+                get: () => ({ effectiveType: '4g', rtt: 100, downlink: 10 })
+            });
         """)
 
         page = context.new_page()
-        print("🌐 加载 CoinMarketCap...")
-        page.goto(CMC_URL, timeout=60000)
-        page.wait_for_timeout(10000)  # 给足时间加载 JS
 
-        # 尝试滚动到底部再回顶部（触发懒加载）
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(2000)
-        page.evaluate("window.scrollTo(0, 0)")
+        # 拦截并等待关键 API（可选，提升可靠性）
+        api_loaded = False
+        def on_response(response):
+            nonlocal api_loaded
+            if "/v1/cryptocurrency/etf/" in response.url and response.status == 200:
+                api_loaded = True
+                print("✅ ETF 数据 API 已加载")
+
+        page.on("response", on_response)
+
+        print("🌐 正在加载 CoinMarketCap...")
+        page.goto(CMC_URL, wait_until="domcontentloaded", timeout=60000)
+
+        # 等待基础结构
+        page.wait_for_timeout(5000)
+
+        # 👁️ 模拟真人行为：缓慢滚动 + 鼠标移动
+        print("🖱️ 模拟真人交互...")
+        for i in range(1, 6):
+            scroll_y = i * 300
+            page.evaluate(f"window.scrollTo(0, {scroll_y})")
+            page.wait_for_timeout(800)
+
+            # 鼠标移动到可能的数据区域
+            try:
+                elements = page.query_selector_all("text=Total Net Flow")
+                if elements:
+                    elements[0].hover(timeout=2000)
+                    print("✅ 悬停到 Net Flow 区域")
+            except:
+                pass
+
+        # 等待 API 加载或超时
+        for _ in range(20):
+            if api_loaded:
+                print("📡 确认数据已从 API 加载")
+                break
+            page.wait_for_timeout(1000)
+
+        # 强制激活所有潜在容器
+        page.evaluate("""
+            [...document.querySelectorAll('*')].forEach(el => {
+                if (el.innerText.includes('Total Net Flow')) {
+                    let node = el;
+                    while (node && node !== document.body) {
+                        node.style.visibility = 'visible';
+                        node.style.opacity = '1';
+                        node.style.display = 'block';
+                        node = node.parentElement;
+                    }
+                    el.scrollIntoView({block: 'center', behavior: 'auto'});
+                }
+            });
+        """)
         page.wait_for_timeout(3000)
 
-        # 不依赖 visible，直接强制显示 + 截图
-        print("✨ 强制激活数据区域...")
-        page.evaluate("""
-            // 找到包含 Net Flow 的容器并强制显示
-            const containers = [...document.querySelectorAll('div')].filter(d =>
-                d.innerText.includes('Total Net Flow')
-            );
-            if (containers.length > 0) {
-                let el = containers[0];
-                while (el && el !== document.body) {
-                    el.style.visibility = 'visible';
-                    el.style.opacity = '1';
-                    el.style.display = 'block';
-                    el = el.parentElement;
-                }
-                el.scrollIntoView({block: 'center'});
-            }
-        """)
-        page.wait_for_timeout(2000)
-
-        # 全页截图（确保捕获所有内容）
+        # 全页截图
         print("📸 全页截图...")
         page.screenshot(path=SCREENSHOT_PATH, full_page=True)
-
         browser.close()
 
-        # 验证截图是否有效
-        if os.path.exists(SCREENSHOT_PATH) and os.path.getsize(SCREENSHOT_PATH) > 2048:
+        # 严格验证
+        if os.path.exists(SCREENSHOT_PATH) and os.path.getsize(SCREENSHOT_PATH) > 3072:
             return True
         else:
-            print("❌ 截图无效（文件太小或缺失）")
+            print("❌ 截图无效（<3KB）")
             return False
 
 def image_to_base64(path):
@@ -137,31 +168,26 @@ def send_pushplus(title, content):
         print(f"⚠️ PushPlus 发送失败: {e}")
 
 def main():
-    print("🚀 启动 CMC Bitcoin ETF 监控（权威源）...")
+    print("🚀 启动 CMC 监控（真人模拟模式）...")
     try:
-        if not take_screenshot():
-            send_pushplus("❌ 截图失败", "无法生成有效截图（可能页面未加载）")
+        success = take_screenshot()
+
+        # 总是推送截图用于诊断
+        if os.path.exists(SCREENSHOT_PATH):
+            with open(SCREENSHOT_PATH, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            send_pushplus(
+                "🖼️ CMC 截图（调试）",
+                f'<img src="data:image/png;base64,{b64}" style="max-width:100%; height:auto;">'
+            )
+
+        if not success:
+            send_pushplus("❌ 截图失败", "文件太小或未生成")
             return
 
         image_b64 = image_to_base64(SCREENSHOT_PATH)
         result = analyze_with_qwen_vl(image_b64)
-
-        # 清理响应
-        clean = result.strip().strip('`')
-        if clean.startswith("json"): clean = clean[4:].strip()
-        data = json.loads(clean)
-
-        if "error" in data:
-            send_pushplus("🔍 数据未识别", "Qwen-VL 未能提取 Net Flow 数据")
-        else:
-            msg = f"<b>📅 日期:</b> {data['date']}<br><b>💰 Net Flow:</b> {data['net_flow']}<br><i>来源: CoinMarketCap (官方)</i>"
-            send_pushplus("📊 Bitcoin ETF 数据", msg)
-
-    except Exception as e:
-        send_pushplus("💥 程序异常", f"<pre>{str(e)}</pre>")
-    finally:
-        if os.path.exists(SCREENSHOT_PATH):
-            os.remove(SCREENSHOT_PATH)
+        # ...后续处理...
 
 if __name__ == "__main__":
     main()
