@@ -7,7 +7,7 @@ on:
 
 jobs:
   monitor:
-    runs-on: [self-hosted, Windows, etf-monitor]  # 👈 匹配你设置的标签
+    runs-on: [self-hosted, Windows]  # 👈 匹配你设置的标签
     steps:
       - uses: actions/checkout@v4
 
