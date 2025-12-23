@@ -1,33 +1,49 @@
-- name: Install dependencies
-  run: |
-    pip install playwright requests
-    python -m playwright install chromium
+name: 📊 Bitcoin ETF Monitor
 
 on:
+  # 手动触发
+  workflow_dispatch:
+
+  # 每天自动运行（UTC 时间 1:30 = 北京时间 9:30）
   schedule:
-    # 每天 UTC 时间 1:30 触发（北京时间 9:30）
     - cron: '30 1 * * *'
-  workflow_dispatch:  # 允许手动触发
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+
     steps:
-      - name: 🛎️ Checkout Code
+      # 1. 检出代码
+      - name: 📥 Checkout code
         uses: actions/checkout@v4
 
+      # 2. 设置 Python 环境
       - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
-      - name: ⚙️ Install Dependencies
+      # 3. 安装依赖
+      - name: 📦 Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          playwright install chromium
+          python -m playwright install chromium
+          python -m playwright install-deps  # 安装系统依赖（字体、lib等）
 
-      - name: ▶️ Run ETF Monitor
+      # 4. 运行监控脚本（带密钥）
+      - name: 🚀 Run ETF Monitor
         env:
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         run: python etf_monitor.py
+
+      # 5. 【可选】如果失败，上传截图用于调试
+      - name: 📎 Upload debug screenshot (on failure)
+        if: failure() && env.SCREENSHOT_PATH != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshot
+          path: /tmp/cmc_etf.png
+          retention-days: 3
