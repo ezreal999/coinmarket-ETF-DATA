@@ -6,10 +6,6 @@ from playwright.sync_api import sync_playwright
 
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN")
-
-if not DASHSCOPE_API_KEY or not PUSHPLUS_TOKEN:
-    raise EnvironmentError("请设置 DASHSCOPE_API_KEY 和 PUSHPLUS_TOKEN")
-
 SCREENSHOT_PATH = "/tmp/cmc_etf.png"
 CMC_URL = "https://coinmarketcap.com/etf/bitcoin/"
 
@@ -24,6 +20,7 @@ def take_screenshot():
                 "--disable-gpu",
                 "--disable-background-timer-throttling",
                 "--disable-renderer-backgrounding",
+                "--lang=en-US",
             ]
         )
 
@@ -39,47 +36,59 @@ def take_screenshot():
             delete navigator.__proto__.webdriver;
             window.chrome = {runtime: {}};
             Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
         """)
 
         page = context.new_page()
         print("🌐 加载 CoinMarketCap...")
         page.goto(CMC_URL, timeout=60000)
-        page.wait_for_timeout(8000)  # 等待基础渲染
+        page.wait_for_timeout(10000)  # 给足时间加载 JS
 
-        # ✅ 关键：不再等待 visible，只等待元素存在
-        try:
-            print("🔍 等待 'Total Net Flow' 元素存在（不要求可见）...")
-            page.wait_for_selector("text=Total Net Flow", timeout=30000, state="attached")
-        except Exception as e:
-            print(f"❌ 元素未出现: {e}")
-            page.screenshot(path=SCREENSHOT_PATH)
-            browser.close()
-            return False
+        # 尝试滚动到底部再回顶部（触发懒加载）
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(2000)
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(3000)
 
-        # ✅ 强制让所有包含 "Total Net Flow" 的元素可见
-        print("✨ 强制显示隐藏元素...")
+        # 不依赖 visible，直接强制显示 + 截图
+        print("✨ 强制激活数据区域...")
         page.evaluate("""
-            [...document.querySelectorAll('*')].forEach(el => {
-                if (el.textContent && el.textContent.includes('Total Net Flow')) {
+            // 找到包含 Net Flow 的容器并强制显示
+            const containers = [...document.querySelectorAll('div')].filter(d =>
+                d.innerText.includes('Total Net Flow')
+            );
+            if (containers.length > 0) {
+                let el = containers[0];
+                while (el && el !== document.body) {
                     el.style.visibility = 'visible';
                     el.style.opacity = '1';
                     el.style.display = 'block';
-                    // 滚动到该元素
-                    el.scrollIntoView({ behavior: 'auto', block: 'center' });
+                    el = el.parentElement;
                 }
-            });
+                el.scrollIntoView({block: 'center'});
+            }
         """)
         page.wait_for_timeout(2000)
 
-        # 截图
-        print("📸 截图...")
-        page.screenshot(path=SCREENSHOT_PATH, full_page=False)
+        # 全页截图（确保捕获所有内容）
+        print("📸 全页截图...")
+        page.screenshot(path=SCREENSHOT_PATH, full_page=True)
+
         browser.close()
-        return True
+
+        # 验证截图是否有效
+        if os.path.exists(SCREENSHOT_PATH) and os.path.getsize(SCREENSHOT_PATH) > 2048:
+            return True
+        else:
+            print("❌ 截图无效（文件太小或缺失）")
+            return False
 
 def image_to_base64(path):
     with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+        data = f.read()
+        if len(data) < 1000:
+            raise ValueError("图片数据过小")
+        return base64.b64encode(data).decode("utf-8")
 
 def analyze_with_qwen_vl(image_b64):
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation"
@@ -92,9 +101,11 @@ def analyze_with_qwen_vl(image_b64):
                 "content": [
                     {"image": f"data:image/png;base64,{image_b64}"},
                     {"text": (
-                        "从这张 CoinMarketCap ETF 页面截图中提取最新一天的 Net Flow 数值和日期。\n"
-                        "只返回纯 JSON：{\"date\": \"Dec 22, 2025\", \"net_flow\": \"+$123M\"}\n"
-                        "如无法识别，返回 {\"error\": \"not found\"}"
+                        "你是一个金融数据提取器。请从这张 CoinMarketCap Bitcoin ETF 页面中：\n"
+                        "1. 找到最新日期（通常是表格第一行，格式如 'Dec 22, 2025'）\n"
+                        "2. 提取对应的 'Net Flow' 数值（如 '+$123M' 或 '-$45M'）\n"
+                        "只返回纯 JSON：{\"date\": \"...\", \"net_flow\": \"...\"}\n"
+                        "如果找不到，返回 {\"error\": \"data not found\"}"
                     )}
                 ]
             }]
@@ -103,38 +114,49 @@ def analyze_with_qwen_vl(image_b64):
     }
     resp = requests.post(url, headers=headers, json=payload, timeout=30)
     if resp.status_code != 200:
-        raise Exception(f"Qwen-VL 错误: {resp.text}")
-    text = resp.json()["output"]["choices"][0]["message"]["content"][0]["text"]
-    return text
+        raise Exception(f"Qwen-VL API 错误 ({resp.status_code}): {resp.text}")
+    try:
+        text = resp.json()["output"]["choices"][0]["message"]["content"][0]["text"]
+        return text
+    except KeyError as e:
+        raise Exception(f"Qwen-VL 响应格式异常: {resp.text}")
 
 def send_pushplus(title, content):
-    requests.post("http://www.pushplus.plus/send", json={
-        "token": PUSHPLUS_TOKEN,
-        "title": title,
-        "content": content,
-        "template": "html"
-    })
+    try:
+        requests.post(
+            "http://www.pushplus.plus/send",
+            json={
+                "token": PUSHPLUS_TOKEN,
+                "title": title,
+                "content": content,
+                "template": "html"
+            },
+            timeout=10
+        )
+    except Exception as e:
+        print(f"⚠️ PushPlus 发送失败: {e}")
 
 def main():
-    print("🚀 启动 CoinMarketCap ETF 监控（高级反反爬模式）...")
+    print("🚀 启动 CMC Bitcoin ETF 监控（权威源）...")
     try:
         if not take_screenshot():
-            send_pushplus("❌ 截图失败", "CoinMarketCap 页面未加载出可见的 Net Flow 数据（可能被反爬）")
+            send_pushplus("❌ 截图失败", "无法生成有效截图（可能页面未加载）")
             return
 
-        b64 = image_to_base64(SCREENSHOT_PATH)
-        result = analyze_with_qwen_vl(b64)
+        image_b64 = image_to_base64(SCREENSHOT_PATH)
+        result = analyze_with_qwen_vl(image_b64)
 
-        # 清理并解析 JSON
+        # 清理响应
         clean = result.strip().strip('`')
         if clean.startswith("json"): clean = clean[4:].strip()
         data = json.loads(clean)
 
         if "error" in data:
-            send_pushplus("🔍 识别失败", "Qwen-VL 未能提取数据")
+            send_pushplus("🔍 数据未识别", "Qwen-VL 未能提取 Net Flow 数据")
         else:
-            msg = f"<b>📅 日期:</b> {data['date']}<br><b>💰 Net Flow:</b> {data['net_flow']}"
-            send_pushplus("📊 CMC Bitcoin ETF 数据", msg)
+            msg = f"<b>📅 日期:</b> {data['date']}<br><b>💰 Net Flow:</b> {data['net_flow']}<br><i>来源: CoinMarketCap (官方)</i>"
+            send_pushplus("📊 Bitcoin ETF 数据", msg)
+
     except Exception as e:
         send_pushplus("💥 程序异常", f"<pre>{str(e)}</pre>")
     finally:
