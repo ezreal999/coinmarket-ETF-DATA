@@ -4,10 +4,12 @@ import json
 import requests
 from playwright.sync_api import sync_playwright
 
+# === 配置 ===
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN")
 SCREENSHOT_PATH = "/tmp/cmc_etf.png"
 CMC_URL = "https://coinmarketcap.com/etf/bitcoin/"
+
 
 def take_screenshot():
     with sync_playwright() as p:
@@ -21,7 +23,7 @@ def take_screenshot():
                 "--disable-background-timer-throttling",
                 "--disable-renderer-backgrounding",
                 "--lang=en-US",
-                "--disable-features=IsolateOrigins,site-per-process",  # 减少沙箱隔离
+                "--disable-features=IsolateOrigins,site-per-process",
             ]
         )
 
@@ -31,7 +33,6 @@ def take_screenshot():
             locale="en-US",
             timezone_id="America/New_York",
             permissions=["geolocation"],
-            java_script_enabled=True,
         )
 
         context.add_init_script("""
@@ -45,50 +46,22 @@ def take_screenshot():
         """)
 
         page = context.new_page()
-
-        # 拦截并等待关键 API（可选，提升可靠性）
-        api_loaded = False
-        def on_response(response):
-            nonlocal api_loaded
-            if "/v1/cryptocurrency/etf/" in response.url and response.status == 200:
-                api_loaded = True
-                print("✅ ETF 数据 API 已加载")
-
-        page.on("response", on_response)
-
-        print("🌐 正在加载 CoinMarketCap...")
+        print("🌐 加载 CoinMarketCap...")
         page.goto(CMC_URL, wait_until="domcontentloaded", timeout=60000)
-
-        # 等待基础结构
         page.wait_for_timeout(5000)
 
-        # 👁️ 模拟真人行为：缓慢滚动 + 鼠标移动
-        print("🖱️ 模拟真人交互...")
+        # 模拟真人滚动
+        print("🖱️ 模拟真人滚动...")
         for i in range(1, 6):
-            scroll_y = i * 300
-            page.evaluate(f"window.scrollTo(0, {scroll_y})")
+            page.evaluate(f"window.scrollTo(0, {i * 300})")
             page.wait_for_timeout(800)
 
-            # 鼠标移动到可能的数据区域
-            try:
-                elements = page.query_selector_all("text=Total Net Flow")
-                if elements:
-                    elements[0].hover(timeout=2000)
-                    print("✅ 悬停到 Net Flow 区域")
-            except:
-                pass
-
-        # 等待 API 加载或超时
-        for _ in range(20):
-            if api_loaded:
-                print("📡 确认数据已从 API 加载")
-                break
-            page.wait_for_timeout(1000)
-
-        # 强制激活所有潜在容器
+        # 安全强制显示（修复 innerText null 错误）
+        print("✨ 强制激活数据区域（安全版）...")
         page.evaluate("""
             [...document.querySelectorAll('*')].forEach(el => {
-                if (el.innerText.includes('Total Net Flow')) {
+                const text = el.innerText;
+                if (typeof text === 'string' && text.includes('Total Net Flow')) {
                     let node = el;
                     while (node && node !== document.body) {
                         node.style.visibility = 'visible';
@@ -107,23 +80,30 @@ def take_screenshot():
         page.screenshot(path=SCREENSHOT_PATH, full_page=True)
         browser.close()
 
-        # 严格验证
+        # 验证截图有效性
         if os.path.exists(SCREENSHOT_PATH) and os.path.getsize(SCREENSHOT_PATH) > 3072:
             return True
         else:
-            print("❌ 截图无效（<3KB）")
+            print("❌ 截图无效（文件太小）")
             return False
 
+
 def image_to_base64(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"截图文件不存在: {path}")
+    size = os.path.getsize(path)
+    if size < 1000:
+        raise ValueError("图片文件过小，可能为空")
     with open(path, "rb") as f:
-        data = f.read()
-        if len(data) < 1000:
-            raise ValueError("图片数据过小")
-        return base64.b64encode(data).decode("utf-8")
+        return base64.b64encode(f.read()).decode("utf-8")
+
 
 def analyze_with_qwen_vl(image_b64):
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation"
-    headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+        "Content-Type": "application/json"
+    }
     payload = {
         "model": "qwen-vl-plus",
         "input": {
@@ -149,8 +129,9 @@ def analyze_with_qwen_vl(image_b64):
     try:
         text = resp.json()["output"]["choices"][0]["message"]["content"][0]["text"]
         return text
-    except KeyError as e:
+    except KeyError:
         raise Exception(f"Qwen-VL 响应格式异常: {resp.text}")
+
 
 def send_pushplus(title, content):
     try:
@@ -167,12 +148,13 @@ def send_pushplus(title, content):
     except Exception as e:
         print(f"⚠️ PushPlus 发送失败: {e}")
 
+
 def main():
-    print("🚀 启动 CMC 监控（真人模拟模式）...")
+    print("🚀 启动 CMC Bitcoin ETF 监控（权威源 | 真人模拟）...")
     try:
         success = take_screenshot()
 
-        # 总是推送截图用于诊断
+        # 总是推送截图用于调试（关键！）
         if os.path.exists(SCREENSHOT_PATH):
             with open(SCREENSHOT_PATH, "rb") as f:
                 b64 = base64.b64encode(f.read()).decode()
@@ -182,22 +164,26 @@ def main():
             )
 
         if not success:
-            send_pushplus("❌ 截图失败", "文件太小或未生成")
+            send_pushplus("❌ 截图失败", "无法生成有效截图（可能页面未加载或被拦截）")
             return
 
         image_b64 = image_to_base64(SCREENSHOT_PATH)
         result = analyze_with_qwen_vl(image_b64)
 
-        # 清理响应
+        # 清理 LLM 输出
         clean = result.strip().strip('`')
         if clean.startswith("json"):
             clean = clean[4:].strip()
         data = json.loads(clean)
 
         if "error" in data:
-            send_pushplus("🔍 数据未识别", "Qwen-VL 未能提取 Net Flow 数据")
+            send_pushplus("🔍 数据未识别", "Qwen-VL 未能从截图中提取 Net Flow 数据")
         else:
-            msg = f"<b>📅 日期:</b> {data['date']}<br><b>💰 Net Flow:</b> {data['net_flow']}<br><i>来源: CoinMarketCap (官方)</i>"
+            msg = (
+                f"<b>📅 日期:</b> {data['date']}<br>"
+                f"<b>💰 Net Flow:</b> {data['net_flow']}<br>"
+                f"<i>来源: CoinMarketCap (官方)</i>"
+            )
             send_pushplus("📊 Bitcoin ETF 数据", msg)
 
     except Exception as e:
@@ -205,6 +191,7 @@ def main():
     finally:
         if os.path.exists(SCREENSHOT_PATH):
             os.remove(SCREENSHOT_PATH)
+
 
 if __name__ == "__main__":
     main()
